@@ -5,11 +5,13 @@ Here's our first attempt at using data to create a table:
 
 import json
 import logging
+from typing import Literal
 
 import streamlit as st
 from langchain.chat_models import init_chat_model
 from langchain.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain.tools import tool
+from langgraph.graph import END, START, MessagesState, StateGraph
 
 from vector_store import search_faqs, search_inventory
 
@@ -18,7 +20,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
-
 
 st.set_page_config(page_title="Customer Support Agent", layout="wide")
 
@@ -56,15 +57,39 @@ if "messages" not in st.session_state:
     ]
 
 
-@tool(description="Search business FAQ's")
-def search_business_faqs(query: str):
-    """Fetch top 3 FAQ results for user query"""
+@tool
+def search_business_faqs(query: str) -> list[dict]:
+    """Search the shop's FAQ knowledge base for questions about how the business
+    operates: delivery areas and timing, same-day delivery, payment methods,
+    refunds and returns, order changes, opening hours, and similar policies.
+
+    Args:
+        query: A natural-language description of the customer's question,
+            e.g. "do you deliver internationally" or "what is the return policy".
+
+    Returns:
+        Up to 3 of the most relevant FAQ entries, each with `question` and `answer`.
+    """
     return search_faqs(query)
 
 
-@tool(description="Search product inventory")
-def search_product_inventory(query: str):
-    """Fetch top 5 products for user query"""
+@tool
+def search_product_inventory(query: str) -> list[dict]:
+    """Search the live product inventory for flowers and arrangements, returning
+    their availability and current price. This is the source of truth for what is
+    in stock and how much it costs.
+
+    Use this when the customer asks about specific flowers, bouquets, arrangements,
+    occasions (e.g. birthday, wedding), colors, types, or budget.
+
+    Args:
+        query: A natural-language description of what the customer is looking for,
+            e.g. "white tulips for a birthday" or "affordable mixed bouquet".
+
+    Returns:
+        Up to 5 matching products, each with `id`, `name`, `price` (USD),
+        `quantity` in stock, `type`, and `description`.
+    """
     return search_inventory(query)
 
 
@@ -75,27 +100,57 @@ tools_by_name = {tool.name: tool for tool in tools}
 model = init_chat_model("gpt-4o-mini", temperature=0).bind_tools(tools)
 
 
-def invoke_agent():
-    end = False
-    while not end:
-        response = model.invoke(st.session_state.messages)
-        st.session_state.messages.append(response)
+def llm_call(state: MessagesState) -> MessagesState:
+    """LLM decides whether to call a tool or not"""
+    response = model.invoke(state["messages"])
+    return {"messages": [response]}
 
-        if response.tool_calls:
-            for tool_call in response.tool_calls:
-                logger.info(f"Calling tool {tool_call['name']} ")
-                tool = tools_by_name[tool_call["name"]]
-                observation = tool.invoke(tool_call["args"])
-                if not isinstance(observation, str):
-                    observation = json.dumps(observation, default=str)
-                tool_message = ToolMessage(
-                    content=observation, tool_call_id=tool_call["id"]
-                )
-                st.session_state.messages.append(tool_message)
-        else:
-            end = True
 
-    return st.session_state.messages
+def should_continue(state: MessagesState) -> Literal["tool_node", END]:
+    """Decide if we should continue the loop or stop based upon whether the LLM made a tool call"""
+
+    last_message = state["messages"][-1]
+
+    # If the LLM makes a tool call, then perform an action
+    if last_message.tool_calls:
+        return "tool_node"
+
+    # Otherwise, we stop (reply to the user)
+    return END
+
+
+def tool_node(state: MessagesState):
+    """Performs the tool call"""
+
+    last_message = state["messages"][-1]
+
+    result = []
+    for tool_call in last_message.tool_calls:
+        tool = tools_by_name[tool_call["name"]]
+        observation = tool.invoke(tool_call["args"])
+        # ToolMessage.content must be a string. A list/dict gets interpreted as
+        # OpenAI "content blocks" (each needing a valid `type`), which fails.
+        if not isinstance(observation, str):
+            observation = json.dumps(observation, default=str)
+        result.append(ToolMessage(content=observation, tool_call_id=tool_call["id"]))
+
+    return {"messages": result}
+
+
+# Compile the graph once and reuse it across reruns. Without caching, Streamlit
+# rebuilds and recompiles the whole graph on every interaction.
+@st.cache_resource
+def build_agent():
+    graph = StateGraph(MessagesState)
+    graph.add_node(llm_call)
+    graph.add_node(tool_node)
+    graph.add_edge(START, "llm_call")
+    graph.add_conditional_edges("llm_call", should_continue, ["tool_node", END])
+    graph.add_edge("tool_node", "llm_call")
+    return graph.compile()
+
+
+agent = build_agent()
 
 
 # Clear chat button lives in the sidebar, out of the conversation flow
@@ -113,8 +168,15 @@ with st.sidebar:
 user_input = st.chat_input("Ask Question...")
 
 if user_input:
+    # session_state is the only state that survives a Streamlit rerun, so it
+    # is our source of truth for the whole conversation.
     st.session_state.messages.append(HumanMessage(content=user_input))
-    invoke_agent()
+
+    # Pass the full history in. MessagesState's add_messages reducer appends
+    # each node's output, so result["messages"] is the complete updated list
+    # (original history + new AI/tool messages). Write it back to persist.
+    result = agent.invoke({"messages": st.session_state.messages})
+    st.session_state.messages = result["messages"]
 
 
 # Render messages in natural order (oldest -> newest) so the newest sits
