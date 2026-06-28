@@ -6,13 +6,7 @@
 uv sync
 ```
 
-2. Run streamlit server.
-
-```sh
-uv run streamlit run streamlit_frontend.py
-```
-
-3.  Postgres setup
+2.  Postgres setup
 
 ```sh
 # Run postgres

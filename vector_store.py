@@ -2,6 +2,7 @@ import json
 import os
 
 import psycopg
+import streamlit as st
 from dotenv import load_dotenv
 from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
@@ -22,10 +23,9 @@ register_vector(conn)
 
 
 # Load model. Downloads automatically if not present
-model = SentenceTransformer(
-    os.environ["EMBEDDINGS_MODEL"],
-    device="mps",
-)
+@st.cache_resource
+def load_model():
+    return SentenceTransformer(os.environ["EMBEDDINGS_MODEL"], device="mps")
 
 
 def load_faqs():
@@ -39,6 +39,7 @@ def load_faqs():
     ]
 
     # Create embeddings from documents
+    model = load_model()
     embeddings = model.encode(
         documents,
         normalize_embeddings=True,
@@ -77,6 +78,7 @@ def load_inventory():
     ]
 
     # Create embeddings from documents
+    model = load_model()
     embeddings = model.encode(
         documents,
         normalize_embeddings=True,
@@ -108,6 +110,7 @@ def load_inventory():
 
 
 def search_faqs(query: str):
+    model = load_model()
     query_embedding = model.encode(
         query,
         normalize_embeddings=True,
@@ -118,19 +121,22 @@ def search_faqs(query: str):
             """
             SELECT
                 question,
-                answer,
-                embedding <=> %s AS distance
+                answer
             FROM faqs
             ORDER BY embedding <=> %s
             LIMIT 3;
             """,
-            (query_embedding, query_embedding),
+            (query_embedding,),
         )
 
-        return cur.fetchall()
+        return [
+            {"question": question, "answer": answer}
+            for question, answer in cur.fetchall()
+        ]
 
 
 def search_inventory(query: str):
+    model = load_model()
     query_embedding = model.encode(
         query,
         normalize_embeddings=True,
@@ -145,16 +151,25 @@ def search_inventory(query: str):
                 price,
                 quantity,
                 type,
-                description,
-                embedding <=> %s AS distance
+                description
             FROM inventory
             ORDER BY embedding <=> %s
             LIMIT 5;
             """,
-            (query_embedding, query_embedding),
+            (query_embedding,),
         )
 
-        return cur.fetchall()
+        return [
+            {
+                "id": id,
+                "name": name,
+                "price": float(price),
+                "quantity": quantity,
+                "type": type,
+                "description": description,
+            }
+            for id, name, price, quantity, type, description in cur.fetchall()
+        ]
 
 
 if __name__ == "__main__":
