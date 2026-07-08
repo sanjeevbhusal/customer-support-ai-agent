@@ -11,3 +11,4 @@ wheels/
 
 # env variables
 .env
+plan.md

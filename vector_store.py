@@ -1,25 +1,29 @@
 import json
 import os
 
-import psycopg
 import streamlit as st
 from dotenv import load_dotenv
 from pgvector.psycopg import register_vector
+from psycopg_pool import ConnectionPool
 from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
-# Create a psycopg2 postgres connection
-conn = psycopg.connect(
-    host="localhost",
-    port=5434,
-    dbname="vectordb",
-    user="postgres",
-    password="postgres",
-)
 
-# Register pgvector python package to this connection. This package supports the type converstion (serialization and deserialization) between numpy arrays and postgres native vector type.
-register_vector(conn)
+# Each pooled connection needs pgvector registered so numpy arrays serialize to
+# and from the postgres vector type.
+def _configure(conn):
+    register_vector(conn)
+
+
+pool = ConnectionPool(
+    "host=localhost port=5434 dbname=vectordb user=postgres password=postgres",
+    kwargs={"autocommit": True},
+    configure=_configure,
+    min_size=1,
+    max_size=10,
+    open=True,
+)
 
 
 # Load model. Downloads automatically if not present
@@ -55,15 +59,14 @@ def load_faqs():
         )
         for faq, embedding in zip(faqs, embeddings)
     ]
-    with conn:
-        with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO faqs (question, answer, embedding)
-                VALUES (%s, %s, %s)
-                """,
-                rows,
-            )
+    with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO faqs (question, answer, embedding)
+            VALUES (%s, %s, %s)
+            """,
+            rows,
+        )
 
 
 def load_inventory():
@@ -98,78 +101,14 @@ def load_inventory():
         )
         for item, embedding in zip(inventory, embeddings)
     ]
-    with conn:
-        with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO inventory (id, name, quantity, price, type, description, embedding)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                rows,
-            )
-
-
-def search_faqs(query: str):
-    model = load_model()
-    query_embedding = model.encode(
-        query,
-        normalize_embeddings=True,
-    )
-
-    with conn.cursor() as cur:
-        cur.execute(
+    with pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
             """
-            SELECT
-                question,
-                answer
-            FROM faqs
-            ORDER BY embedding <=> %s
-            LIMIT 3;
+            INSERT INTO inventory (id, name, quantity, price, type, description, embedding)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
-            (query_embedding,),
+            rows,
         )
-
-        return [
-            {"question": question, "answer": answer}
-            for question, answer in cur.fetchall()
-        ]
-
-
-def search_inventory(query: str):
-    model = load_model()
-    query_embedding = model.encode(
-        query,
-        normalize_embeddings=True,
-    )
-
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT
-                id,
-                name,
-                price,
-                quantity,
-                type,
-                description
-            FROM inventory
-            ORDER BY embedding <=> %s
-            LIMIT 5;
-            """,
-            (query_embedding,),
-        )
-
-        return [
-            {
-                "id": id,
-                "name": name,
-                "price": float(price),
-                "quantity": quantity,
-                "type": type,
-                "description": description,
-            }
-            for id, name, price, quantity, type, description in cur.fetchall()
-        ]
 
 
 if __name__ == "__main__":

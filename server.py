@@ -5,15 +5,14 @@ Here's our first attempt at using data to create a table:
 
 import json
 import logging
-from typing import Literal
+from typing import Literal, cast
 
 import streamlit as st
 from langchain.chat_models import init_chat_model
 from langchain.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain.tools import tool
 from langgraph.graph import END, START, MessagesState, StateGraph
 
-from vector_store import search_faqs, search_inventory
+from tools import authenticate_user, resolve_tool_args, tools, tools_by_name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +36,31 @@ Tools available to you:
 delivery, payments, returns, or how the shop operates. Do not guess at policy.
 - `search_product_inventory`: use this to find products, check availability, and \
 get current prices. Always rely on this for what is in stock and how much it costs.
+- `get_current_user`: use this to see who is currently signed in, for example to \
+greet them by name or confirm whose account an order will go under.
+- `place_order`: use this to place an order for the signed-in customer. Requires \
+the product id, the quantity, and a delivery location.
+- `get_orders`: use this to look up the signed-in customer's existing orders.
+
+Accounts and ordering:
+- Customers sign in using the login form in the sidebar, not through chat. Never \
+ask for, collect, or handle an email, password, or user id in the conversation.
+- The signed-in customer's identity is handled automatically. You do not pass a \
+user id to any tool; if you need to know who you are talking to, call \
+`get_current_user`.
+- A customer must be signed in before you can place an order or look up their \
+orders. If they want to do either but are not signed in (a tool will tell you so \
+with an error, or `get_current_user` will report no one is signed in), politely \
+ask them to log in using the login form in the sidebar on the left.
+- Only bring up signing in when the customer actually wants to place an order or \
+check their orders. While they are just browsing, asking questions, or comparing \
+products, do not mention accounts - let them inquire freely.
+- To place an order you need the product (use `search_product_inventory` to get \
+its `id`), the quantity, and a delivery location (e.g. "Shankhamul, Kathmandu"). \
+Confirm these details with the customer, then call `place_order`.
+- If a tool returns an `error` (e.g. not signed in, or not enough stock), explain \
+it to the customer and guide them to the right next step (logging in via the \
+sidebar, or choosing a different product or quantity).
 
 Guidelines:
 - Always ground answers in the information returned by the tools. Never invent \
@@ -56,45 +80,10 @@ if "messages" not in st.session_state:
         AIMessage(content=GREETING),
     ]
 
+# The authenticated customer (or None).
+if "auth_user" not in st.session_state:
+    st.session_state.auth_user = None
 
-@tool
-def search_business_faqs(query: str) -> list[dict]:
-    """Search the shop's FAQ knowledge base for questions about how the business
-    operates: delivery areas and timing, same-day delivery, payment methods,
-    refunds and returns, order changes, opening hours, and similar policies.
-
-    Args:
-        query: A natural-language description of the customer's question,
-            e.g. "do you deliver internationally" or "what is the return policy".
-
-    Returns:
-        Up to 3 of the most relevant FAQ entries, each with `question` and `answer`.
-    """
-    return search_faqs(query)
-
-
-@tool
-def search_product_inventory(query: str) -> list[dict]:
-    """Search the live product inventory for flowers and arrangements, returning
-    their availability and current price. This is the source of truth for what is
-    in stock and how much it costs.
-
-    Use this when the customer asks about specific flowers, bouquets, arrangements,
-    occasions (e.g. birthday, wedding), colors, types, or budget.
-
-    Args:
-        query: A natural-language description of what the customer is looking for,
-            e.g. "white tulips for a birthday" or "affordable mixed bouquet".
-
-    Returns:
-        Up to 5 matching products, each with `id`, `name`, `price` (USD),
-        `quantity` in stock, `type`, and `description`.
-    """
-    return search_inventory(query)
-
-
-tools = [search_business_faqs, search_product_inventory]
-tools_by_name = {tool.name: tool for tool in tools}
 
 # Augment the LLM with tools
 model = init_chat_model("gpt-4o-mini", temperature=0).bind_tools(tools)
@@ -109,7 +98,7 @@ def llm_call(state: MessagesState) -> MessagesState:
 def should_continue(state: MessagesState) -> Literal["tool_node", END]:
     """Decide if we should continue the loop or stop based upon whether the LLM made a tool call"""
 
-    last_message = state["messages"][-1]
+    last_message = cast(AIMessage, state["messages"][-1])
 
     # If the LLM makes a tool call, then perform an action
     if last_message.tool_calls:
@@ -122,12 +111,20 @@ def should_continue(state: MessagesState) -> Literal["tool_node", END]:
 def tool_node(state: MessagesState):
     """Performs the tool call"""
 
-    last_message = state["messages"][-1]
+    last_message = cast(AIMessage, state["messages"][-1])
 
     result = []
     for tool_call in last_message.tool_calls:
-        tool = tools_by_name[tool_call["name"]]
-        observation = tool.invoke(tool_call["args"])
+        # error is set when an auth tool is called with no one signed in.
+        args, error = resolve_tool_args(
+            tool_call["name"], tool_call["args"], st.session_state.auth_user
+        )
+        if error is not None:
+            observation = error
+        else:
+            tool = tools_by_name[tool_call["name"]]
+            observation = tool.invoke(args)
+
         # ToolMessage.content must be a string. A list/dict gets interpreted as
         # OpenAI "content blocks" (each needing a valid `type`), which fails.
         if not isinstance(observation, str):
@@ -162,6 +159,34 @@ with st.sidebar:
         ]
         st.rerun()
 
+    st.divider()
+
+    if st.session_state.auth_user is None:
+        st.subheader("Log in")
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Log in")
+        if submitted:
+            user = authenticate_user(email, password)
+            if user is None:
+                st.error("Invalid email or password.")
+            else:
+                st.session_state.auth_user = user
+                st.rerun()
+    else:
+        user = st.session_state.auth_user
+        st.subheader("Account")
+        st.markdown(f"**{user['first_name']} {user['last_name']}**  \n{user['email']}")
+        if st.button("Log out"):
+            # Reset the conversation too, so it doesn't carry into the next login.
+            st.session_state.auth_user = None
+            st.session_state.messages = [
+                SystemMessage(content=SYSTEM_PROMPT),
+                AIMessage(content=GREETING),
+            ]
+            st.rerun()
+
 
 # chat_input is at the top level of the app, so Streamlit pins it to the
 # bottom of the page. Read it first, then render history above it.
@@ -182,49 +207,48 @@ if user_input:
 # Render messages in natural order (oldest -> newest) so the newest sits
 # just above the pinned input.
 messages = st.session_state.messages
-for index, message in enumerate(messages):
+
+# A ToolMessage holds a tool's result; index them by tool_call_id so each tool
+# call can show its result inline, regardless of where the ToolMessage sits.
+tool_results = {m.tool_call_id: m for m in messages if isinstance(m, ToolMessage)}
+
+
+def render_tool_call(container, tool_call):
+    with container.expander(f"🔧 {tool_call['name']}"):
+        st.caption("Arguments")
+        st.json(tool_call["args"])
+
+        tool_message = tool_results.get(tool_call["id"])
+        if tool_message is not None:
+            st.caption("Result")
+            content = tool_message.content
+            if isinstance(content, str):
+                try:
+                    st.json(json.loads(content))
+                except json.JSONDecodeError:
+                    st.markdown(content)
+            else:
+                st.json(content)
+
+
+# Walk the conversation in order. All the assistant activity for one turn (its
+# tool calls and text, possibly across several AIMessages) goes in a single chat
+# message box; a HumanMessage starts a fresh one.
+ai_box = None
+for message in messages:
     if isinstance(message, (SystemMessage, ToolMessage)):
         continue
 
-    if isinstance(message, AIMessage) and message.tool_calls:
+    if isinstance(message, HumanMessage):
+        ai_box = None
+        st.chat_message("human").markdown(message.content)
         continue
 
-    message_box = st.chat_message(message.type)
-    message_box.markdown(message.content)
+    if ai_box is None:
+        ai_box = st.chat_message("ai")
 
-    # Look BACKWARD for the tool-call turn that produced this message:
-    # ... AIMessage(tool_calls) -> ToolMessage(s) -> this final AIMessage
-    tools_called_message: AIMessage | None = None
-    tool_messages: list[ToolMessage] = []
+    if message.content:
+        ai_box.markdown(message.content)
 
-    for i in range(index - 1, -1, -1):
-        prev = messages[i]
-        if isinstance(prev, ToolMessage):
-            tool_messages.append(prev)
-        elif isinstance(prev, AIMessage) and prev.tool_calls:
-            tools_called_message = prev
-            break
-        else:
-            break
-
-    if tools_called_message:
-        for tool_call in tools_called_message.tool_calls:
-            with message_box.expander(f"🔧 {tool_call['name']}"):
-                st.caption("Arguments")
-                st.json(tool_call["args"])
-
-                tool_message = None
-                for tm in tool_messages:
-                    if tm.tool_call_id == tool_call["id"]:
-                        tool_message = tm
-
-                if tool_message is not None:
-                    st.caption("Result")
-                    content = tool_message.content
-                    if isinstance(content, str):
-                        try:
-                            st.json(json.loads(content))
-                        except json.JSONDecodeError:
-                            st.markdown(content)
-                    else:
-                        st.json(content)
+    for tool_call in message.tool_calls:
+        render_tool_call(ai_box, tool_call)
