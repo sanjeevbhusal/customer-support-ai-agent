@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from tools import _hash_password, pool  # noqa: E402  (needs sys.path above)
+from auth import hash_password  # noqa: E402  (needs sys.path above)
+from vector_store import pool  # noqa: E402
 
 load_dotenv(REPO_ROOT / ".env")
 
@@ -53,7 +54,7 @@ def test_user():
     When the test finishes, cleans up the user and other created resources.
     """
 
-    password_hash = _hash_password(TEST_USER["password"])
+    password_hash = hash_password(TEST_USER["password"])
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             """

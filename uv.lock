@@ -267,6 +267,7 @@ dependencies = [
     { name = "psycopg-pool" },
     { name = "sentence-transformers" },
     { name = "streamlit" },
+    { name = "streamlit-local-storage" },
     { name = "torchvision" },
     { name = "watchdog" },
 ]
@@ -287,6 +288,7 @@ requires-dist = [
     { name = "psycopg-pool", specifier = ">=3.3.1" },
     { name = "sentence-transformers", specifier = ">=5.6.0" },
     { name = "streamlit", specifier = ">=1.58.0" },
+    { name = "streamlit-local-storage", specifier = ">=0.0.25" },
     { name = "torchvision", specifier = ">=0.27.1" },
     { name = "watchdog", specifier = ">=6.0.0" },
 ]
@@ -2134,6 +2136,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/91/74/20dac6d6200d6ec0e1c230fb8eeb6a1a423645eacb76e8d802adfc246456/streamlit-1.58.0.tar.gz", hash = "sha256:78a22e7085b053af7ce544442bf4b670771e68c509ba1bdaa056ba0708f49c3d", size = 8721149, upload-time = "2026-05-28T18:02:44.606Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/df/84/14c36a92fb24f8e1cea452f53b0744b5da69d52cdd2fe22e71e6fbf765d5/streamlit-1.58.0-py3-none-any.whl", hash = "sha256:4ca8a7afc5bd16a5f176ccf4be1e34e8121cad0240becd127fb58a103ea3178d", size = 9219185, upload-time = "2026-05-28T18:02:41.993Z" },
+]
+
+[[package]]
+name = "streamlit-local-storage"
+version = "0.0.25"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "streamlit" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d1/ad/5e92a9355c2f32c162f0e2a2262b90697385edf0fe64bc66a27eb652ac95/streamlit_local_storage-0.0.25.tar.gz", hash = "sha256:9b7c3e8ae7c14a68b47c980b167306181292213736dfa71850c8d3204dc2a9cd", size = 538392, upload-time = "2024-11-18T16:22:09.432Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/a6/502b00b6db10c3d467ec57d822d6647a35f0328ef03668aa5b6dd160f966/streamlit_local_storage-0.0.25-py3-none-any.whl", hash = "sha256:0ef85618ed8c44f347b7acffb2d104da5b6915e6a4e24612f12a4d2cc355b951", size = 543746, upload-time = "2024-11-18T16:22:07.305Z" },
 ]
 
 [[package]]

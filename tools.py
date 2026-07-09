@@ -1,32 +1,10 @@
-import hashlib
-import secrets
 from typing import Annotated
 
 from langchain.tools import tool
 from langchain_core.tools import InjectedToolArg
 
+from auth import get_user_by_id
 from vector_store import load_model, pool
-
-_PBKDF2_ROUNDS = 200_000
-
-
-def _hash_password(password: str, salt: bytes | None = None) -> str:
-    """Return a salted PBKDF2 hash as 'salt_hex$hash_hex' for storage."""
-    if salt is None:
-        salt = secrets.token_bytes(16)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, _PBKDF2_ROUNDS)
-    return f"{salt.hex()}${dk.hex()}"
-
-
-def _verify_password(password: str, stored: str) -> bool:
-    """Check a plaintext password against a stored 'salt_hex$hash_hex' value."""
-    try:
-        salt_hex, hash_hex = stored.split("$")
-    except ValueError:
-        return False
-    salt = bytes.fromhex(salt_hex)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, _PBKDF2_ROUNDS)
-    return secrets.compare_digest(dk.hex(), hash_hex)
 
 
 @tool
@@ -114,50 +92,6 @@ def search_product_inventory(query: str) -> list[dict]:
         ]
 
 
-def authenticate_user(email: str, password: str) -> dict | None:
-    """Validate an email/password pair against the stored account.
-
-    This is the trusted, server-side authentication used by the app's login UI
-    (not a model-callable tool). Identity established here is what gets injected
-    into the auth-required tools, so the model never supplies a user id.
-
-    Args:
-        email: The email address the customer registered with.
-        password: The customer's account password.
-
-    Returns:
-        The account's details (`id`, `first_name`, `last_name`, `email`) on a
-        successful match, or `None` if the email is unknown or the password is
-        wrong. The password/hash is never returned.
-    """
-    email = email.strip().lower()
-
-    with pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, first_name, last_name, email, password_hash
-            FROM users
-            WHERE email = %s;
-            """,
-            (email,),
-        )
-        row = cur.fetchone()
-
-    if row is None:
-        return None
-
-    user_id, first_name, last_name, email, password_hash = row
-    if not _verify_password(password, password_hash):
-        return None
-
-    return {
-        "id": user_id,
-        "first_name": first_name,
-        "last_name": last_name,
-        "email": email,
-    }
-
-
 @tool
 def get_current_user(user_id: Annotated[int, InjectedToolArg]) -> dict:
     """Look up the details of the customer who is currently signed in.
@@ -171,27 +105,10 @@ def get_current_user(user_id: Annotated[int, InjectedToolArg]) -> dict:
         The signed-in customer's `id`, `first_name`, `last_name`, and `email`.
         On failure, a dict with an `error` message.
     """
-    with pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, first_name, last_name, email
-            FROM users
-            WHERE id = %s;
-            """,
-            (user_id,),
-        )
-        row = cur.fetchone()
-
-    if row is None:
+    user = get_user_by_id(user_id)
+    if user is None:
         return {"error": "No signed-in customer was found."}
-
-    user_id, first_name, last_name, email = row
-    return {
-        "id": user_id,
-        "first_name": first_name,
-        "last_name": last_name,
-        "email": email,
-    }
+    return user
 
 
 @tool
@@ -332,29 +249,6 @@ def get_orders(user_id: Annotated[int, InjectedToolArg]) -> dict | list[dict]:
         ]
 
 
-def resolve_tool_args(
-    tool_name: str, args: dict, auth_user: dict | None
-) -> tuple[dict | None, dict | None]:
-    """Inject the signed-in customer's id into auth-required tool calls.
-
-    Returns a `(resolved_args, error)` pair with exactly one side non-None:
-    `(args, None)` if the call may proceed, or `(None, error_dict)` if an
-    auth-required tool was called with no one signed in.
-    """
-    resolved = dict(args)
-    if tool_name not in AUTH_REQUIRED_TOOLS:
-        return resolved, None
-
-    if auth_user is None:
-        return None, {
-            "error": "The customer is not signed in. Ask them to log in using "
-            "the sidebar."
-        }
-
-    resolved["user_id"] = auth_user["id"]
-    return resolved, None
-
-
 tools = [
     search_business_faqs,
     search_product_inventory,
@@ -363,6 +257,3 @@ tools = [
     get_orders,
 ]
 tools_by_name = {tool.name: tool for tool in tools}
-
-# Tools whose `user_id` is injected from the authenticated session.
-AUTH_REQUIRED_TOOLS = {"get_current_user", "place_order", "get_orders"}

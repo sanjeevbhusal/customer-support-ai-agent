@@ -5,14 +5,23 @@ Here's our first attempt at using data to create a table:
 
 import json
 import logging
+import os
 from typing import Literal, cast
 
 import streamlit as st
 from langchain.chat_models import init_chat_model
 from langchain.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
+from streamlit_local_storage import LocalStorage
 
-from tools import authenticate_user, resolve_tool_args, tools, tools_by_name
+from auth import (
+    authenticate_user,
+    clear_persisted_login,
+    load_persisted_user,
+    persist_login,
+    resolve_tool_args,
+)
+from tools import tools, tools_by_name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -83,6 +92,30 @@ if "messages" not in st.session_state:
 # The authenticated customer (or None).
 if "auth_user" not in st.session_state:
     st.session_state.auth_user = None
+
+
+# Browser localStorage keeps the login across full page refreshes, via the auth
+# helpers. The component mounts a frontend widget and busy-waits for the browser,
+# so under pytest (AppTest, no browser) it would hang - skip it there, which makes
+# the auth helpers treat storage as empty.
+local_storage = None if "PYTEST_CURRENT_TEST" in os.environ else LocalStorage()
+
+# A localStorage write only reaches the browser when the script run finishes and
+# flushes to the frontend; calling st.rerun() right after a write discards it. So
+# login/logout record a pending write and we apply it here, at the top of the next
+# run, which then completes normally.
+pending_op = st.session_state.pop("pending_storage_op", None)
+if pending_op == "persist" and st.session_state.auth_user is not None:
+    persist_login(local_storage, st.session_state.auth_user)
+elif pending_op == "clear":
+    clear_persisted_login(local_storage)
+
+# On a fresh page load (new session) auth_user is None; restore it from the token.
+# Skip after an explicit logout so we don't immediately restore the cleared login.
+if st.session_state.auth_user is None and not st.session_state.get("logged_out"):
+    restored_user = load_persisted_user(local_storage)
+    if restored_user is not None:
+        st.session_state.auth_user = restored_user
 
 
 # Augment the LLM with tools
@@ -173,6 +206,8 @@ with st.sidebar:
                 st.error("Invalid email or password.")
             else:
                 st.session_state.auth_user = user
+                st.session_state.logged_out = False
+                st.session_state.pending_storage_op = "persist"
                 st.rerun()
     else:
         user = st.session_state.auth_user
@@ -181,6 +216,8 @@ with st.sidebar:
         if st.button("Log out"):
             # Reset the conversation too, so it doesn't carry into the next login.
             st.session_state.auth_user = None
+            st.session_state.logged_out = True
+            st.session_state.pending_storage_op = "clear"
             st.session_state.messages = [
                 SystemMessage(content=SYSTEM_PROMPT),
                 AIMessage(content=GREETING),
