@@ -16,7 +16,7 @@ import secrets
 import time
 from typing import TYPE_CHECKING
 
-from vector_store import pool
+from db import pool
 
 if TYPE_CHECKING:
     from streamlit_local_storage import LocalStorage

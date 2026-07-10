@@ -14,8 +14,9 @@ from dotenv import load_dotenv
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from auth import hash_password  # noqa: E402  (needs sys.path above)
-from vector_store import pool  # noqa: E402
+import tracing  # noqa: E402  (needs sys.path above)
+from auth import hash_password  # noqa: E402
+from db import pool  # noqa: E402
 
 load_dotenv(REPO_ROOT / ".env")
 
@@ -81,6 +82,16 @@ def test_user():
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM orders WHERE user_id = %s;", (user_id,))
         cur.execute("DELETE FROM users WHERE id = %s;", (user_id,))
+
+
+@pytest.fixture
+def no_db(monkeypatch):
+    """Capture persisted traces instead of writing to Postgres."""
+    written: list = []
+    monkeypatch.setattr(
+        tracing, "_persist_trace", lambda trace, spans: written.append((trace, spans))
+    )
+    return written
 
 
 @pytest.fixture

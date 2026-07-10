@@ -4,7 +4,8 @@ from langchain.tools import tool
 from langchain_core.tools import InjectedToolArg
 
 from auth import get_user_by_id
-from vector_store import load_model, pool
+from db import pool
+from vector_store import load_model
 
 
 @tool

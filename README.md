@@ -32,6 +32,50 @@ If a user isn't logged in and wants to order, it first asks user to log in.
 
 # Developers Guide
 
+## Architecture
+
+The code separates the **agent core** from the **transport** that talks to the
+user.
+
+- **Agent core** (`agent.py`) - the LangGraph agent: the system prompt, the LLM,
+  the tool-calling loop, and the tools (`tools.py`) and auth/session helpers
+  (`auth.py`). It knows nothing about the UI. The signed-in customer is passed in
+  per request via LangGraph config (`configurable.auth_user`) rather than read
+  from any global state, so tools always act on behalf of whoever the caller says
+  is signed in:
+
+  ```python
+  from agent import agent
+  result = agent.invoke(
+      {"messages": messages},
+      config={"configurable": {"auth_user": user_or_none}},
+  )
+  ```
+
+- **Transport** (`server.py`) - a Streamlit app: it owns the chat UI, the login
+  sidebar, and session/localStorage persistence, resolves who is signed in, and
+  calls `agent.invoke(...)` with that identity. It is the only part tied to
+  Streamlit.
+
+Because the core is transport-agnostic, the same `agent.invoke(...)` can be
+driven by anything else - a FastAPI endpoint, a Slack bot, a batch script, or the
+eval harness - by supplying the messages and the `auth_user` from that context.
+
+Supporting modules: `db.py` holds the shared Postgres connection pool;
+`vector_store.py` does pgvector embedding search; `tracing.py` records a trace of
+each turn (see Tracing).
+
+## Authentication
+
+Tools that act on a customer's behalf (`place_order`, `get_orders`, `get_current_user`) declare
+`user_id` as a LangChain `InjectedToolArg`, so it is hidden from the model's tool
+schema. The app's tool node injects the session user's id at call time and
+refuses the call if no one is signed in.
+
+The login survives a full browser refresh. On login, a token carrying
+user id is stored in the browser's localStorage. On load the app loads
+the user from the token.
+
 ## Setup
 
 1. Install dependencies.
@@ -94,6 +138,37 @@ CREATE TABLE orders (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE traces (
+    id TEXT PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    source TEXT NOT NULL,
+    thread_id TEXT,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    model TEXT,
+    input_text TEXT,
+    output_text TEXT,
+    num_spans INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd NUMERIC NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'ok',
+    error TEXT
+);
+
+CREATE TABLE spans (
+    id TEXT PRIMARY KEY,
+    trace_id TEXT NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
+    error TEXT
+);
+
 -- Create indexes
 CREATE INDEX faqs_embedding_idx
 ON faqs
@@ -102,6 +177,10 @@ USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX inventory_embedding_idx
 ON inventory
 USING hnsw (embedding vector_cosine_ops);
+
+CREATE INDEX spans_trace_id_idx ON spans (trace_id);
+
+CREATE INDEX traces_created_at_idx ON traces (created_at DESC);
 ```
 
 3. Authentication
@@ -165,7 +244,7 @@ uv run streamlit run server.py
 
 > **Note:** The first time you interact with the chat, it will take some time to get response. This is because the model first needs to be loaded. The UI might show `load_model` text. Once the model is loaded, subsequent calls will be faster.
 
-# Testing
+## Testing
 
 Tests live in `tests/` and cover the application state, tool invoking and LLM calls
 
@@ -181,13 +260,26 @@ uv run pytest --run-slow
 Tests use a self-contained fixture user and clean up after themselves, so they
 do not depend on or modify your own seeded accounts.
 
-# Authentication
+## Tracing
 
-Tools that act on a customer's behalf (`place_order`, `get_orders`, `get_current_user`) declare
-`user_id` as a LangChain `InjectedToolArg`, so it is hidden from the model's tool
-schema. The app's tool node injects the session user's id at call time and
-refuses the call if no one is signed in.
+We record our agent interactions to learn about our agent performance. Tracing is
+kept self-hosted (in Postgres) rather than sent to a SaaS like LangSmith.
+So trace data - including customer messages and customer data stays on our
+own infrastructure.
 
-The login survives a full browser refresh. On login, a token carrying
-user id is stored in the browser's localStorage. On load the app loads
-the user from the token.
+We attach a TraceCollector to Langchain which gets fired for every LLM and tool
+calls. We record Latency, token usage, USD cost and more. For each turn (human -> ai)
+we record a single trace and multiple spans under that trace. A trace stores high
+level details about the entire call while spans store per step details.
+
+Inspect recent turns in `psql`:
+
+```sql
+SELECT id, created_at, source, model, num_spans, total_tokens, cached_input_tokens,
+       cost_usd, latency_ms, status
+FROM traces ORDER BY created_at DESC LIMIT 10;
+
+-- the steps of one trace, in order
+SELECT name, type, duration_ms, error
+FROM spans WHERE trace_id = '<trace-id>' ORDER BY started_at;
+```

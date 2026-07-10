@@ -2,28 +2,9 @@ import json
 import os
 
 import streamlit as st
-from dotenv import load_dotenv
-from pgvector.psycopg import register_vector
-from psycopg_pool import ConnectionPool
 from sentence_transformers import SentenceTransformer
 
-load_dotenv()
-
-
-# Each pooled connection needs pgvector registered so numpy arrays serialize to
-# and from the postgres vector type.
-def _configure(conn):
-    register_vector(conn)
-
-
-pool = ConnectionPool(
-    "host=localhost port=5434 dbname=vectordb user=postgres password=postgres",
-    kwargs={"autocommit": True},
-    configure=_configure,
-    min_size=1,
-    max_size=10,
-    open=True,
-)
+from db import pool
 
 
 # Load model. Downloads automatically if not present
